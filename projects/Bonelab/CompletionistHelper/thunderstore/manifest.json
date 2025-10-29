@@ -1,7 +1,0 @@
-{
-  "name": "CompletionistHelper",
-  "version_number": "1.0.0",
-  "description": "Shows where remaining collectables are located.",
-  "website_url": "https://github.com/jakzo/SlzMods/tree/main/projects/Bonelab/CompletionistHelper",
-  "dependencies": ["LavaGang-MelonLoader-0.5.7"]
-}

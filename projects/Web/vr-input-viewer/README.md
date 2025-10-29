@@ -1,1 +1,0 @@
-Shows a visualization of VR controller inputs and headset position. Requires a Websocket server to be running which sends the input data (like the one in the [Bonelab SpeedrunTimer mod](../../Bonelab/SpeedrunTimer/src/Server.cs)).

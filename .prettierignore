@@ -1,9 +1,0 @@
-dist/
-node_modules/
-.jest/
-.coverage/
-/packages/
-package-lock.json
-CHANGELOG.md
-*_tokens.json
-*_webhook.json

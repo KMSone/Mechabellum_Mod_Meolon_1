@@ -1,0 +1,317 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  prerelease:
+    name: Prerelease
+    runs-on: windows-latest
+    environment: Release
+    outputs:
+      csharp_changesets: ${{ toJson(fromJson(steps.changesets.outputs.result).csharp) }}
+      web_changesets: ${{ toJson(fromJson(steps.changesets.outputs.result).web) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Install dotnet tools
+        run: dotnet tool install -g dotnet-script
+
+      - name: Build
+        run: nuget restore && dotnet build
+
+      - name: Prepare for nightly release
+        run: dotnet script ./scripts/CopyBuildsToBin.csx
+
+      - name: Create nightly release
+        uses: softprops/action-gh-release@v1
+        with:
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          name: "dev ${{ github.run_number }}"
+          tag_name: "dev_${{ github.run_number }}"
+          body: >
+            **DO NOT DOWNLOAD** unless either I told you to or you know what you're doing. Instead look these mods up on Thunderstore and download them from there.
+
+            These are testing builds used for development of the mods. They contain the most recent changes which are usually untested and broken. Use at your own risk.
+          files: ./bin/*.dll
+
+      - name: Load changesets
+        id: changesets
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const path = require("path");
+            const fs = require("fs");
+            const changesets = fs
+              .readdirSync("changesets")
+              .map((filename) => path.parse(filename))
+              .filter(
+                (file) =>
+                  file.ext.toLowerCase() === ".md" && file.name !== "README"
+              )
+              .map((file) => {
+                const parts = file.name.split("_");
+                return {
+                  filename: file.base,
+                  game: parts[0],
+                  project: parts[1],
+                  version_bump_type: parts[2],
+                  changelog_description: fs.readFileSync(
+                    path.join("changesets", file.base),
+                    "utf-8"
+                  ),
+                };
+              });
+            return {
+              web: changesets.filter(changeset => changeset.game === "Web"),
+              csharp: changesets.filter(changeset => changeset.game !== "Web"),
+            };
+
+  release-csharp:
+    name: Release (C#)
+    runs-on: windows-latest
+    environment: Release
+    needs: prerelease
+    if: ${{ needs.prerelease.outputs.csharp_changesets != '[]' }}
+    strategy:
+      matrix:
+        changeset: ${{ fromJson(needs.prerelease.outputs.csharp_changesets) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Install dotnet tools
+        run: |
+          dotnet tool install -g dotnet-script
+          dotnet tool install -g tcli
+
+      - name: Bump version
+        id: bump_version
+        env:
+          GAME: ${{ matrix.changeset.game }}
+          PROJECT: ${{ matrix.changeset.project }}
+          VERSION_BUMP_TYPE: ${{ matrix.changeset.version_bump_type }}
+          CHANGELOG_DESCRIPTION: ${{ matrix.changeset.changelog_description }}
+        run: dotnet script ./scripts/Release.csx -- "$env:GAME" "$env:PROJECT" "$env:VERSION_BUMP_TYPE" "$env:CHANGELOG_DESCRIPTION"
+
+      - name: Build
+        run: nuget restore && dotnet build --configuration Release
+
+      - name: Release to Thunderstore
+        if: steps.bump_version.outputs.release_thunderstore == 'true'
+        env:
+          GAME: ${{ matrix.changeset.game }}
+          PROJECT: ${{ matrix.changeset.project }}
+          NEW_VERSION: ${{ steps.bump_version.outputs.new_version }}
+          TCLI_AUTH_TOKEN: ${{ secrets.THUNDERSTORE_API_TOKEN }}
+        run: node ./scripts/release-to-thunderstore.mjs "$env:GAME" "$env:PROJECT" "$env:NEW_VERSION"
+
+      - name: Release to Github
+        if: steps.bump_version.outputs.release_thunderstore != 'true' && steps.bump_version.outputs.release_livesplit != 'true'
+        shell: pwsh
+        env:
+          GAME: ${{ matrix.changeset.game }}
+          PROJECT: ${{ matrix.changeset.project }}
+          NEW_VERSION: ${{ steps.bump_version.outputs.new_version }}
+        run: |
+          node ./scripts/release-to-github.mjs "$env:GAME" "$env:PROJECT"
+          Compress-Archive -Path "./projects/$env:GAME/$env:PROJECT/dist/build/*" -DestinationPath "./projects/$env:GAME/$env:PROJECT/dist/$env:GAME-$env:PROJECT-$env:NEW_VERSION.zip" -Verbose
+
+      - name: Copy LiveSplit build for commit
+        if: steps.bump_version.outputs.release_livesplit == 'true'
+        env:
+          GAME: ${{ matrix.changeset.game }}
+          PROJECT: ${{ matrix.changeset.project }}
+        run: |
+          $DLL_NAME = "$env:PROJECT.dll"
+          cd "./projects/$env:GAME/$env:PROJECT"
+          mkdir -Force "./Components"
+          Copy-Item "./bin/Release/$DLL_NAME" "./Components/$DLL_NAME"
+
+      - name: Commit version bump
+        run: |
+          Remove-Item "./changesets/${{ matrix.changeset.filename }}"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global core.autocrlf input
+          git add -A
+          git commit -m "Release" --no-verify
+          for ($i = 0; $i -lt 3; $i++) {
+            git fetch
+            try {
+              git rebase --autostash --no-verify
+            } catch {
+              git rebase --abort
+              Write-Output "Failed to rebase with main, probably due to git conflict. Manual fix required..."
+              exit 1
+            }
+            git push --no-verify
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+          }
+          Write-Output "Failed to push version bump after 3 retries. Manual fix required..."
+          exit 1
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          target_commitish: ${{ github.sha }}
+          name: "${{ matrix.changeset.game }} ${{ matrix.changeset.project }} v${{ steps.bump_version.outputs.new_version }}"
+          tag_name: "${{ matrix.changeset.game }}${{ matrix.changeset.project }}_v${{ steps.bump_version.outputs.new_version }}"
+          body: ${{ steps.bump_version.outputs.changelog }}
+          files: |
+            ./projects/${{ matrix.changeset.game }}/${{ matrix.changeset.project }}/dist/*.zip
+            ./projects/${{ matrix.changeset.game }}/${{ matrix.changeset.project }}/thunderstore/build/*.zip
+            ./projects/${{ matrix.changeset.game }}/${{ matrix.changeset.project }}/bin/Release/${{ matrix.changeset.project }}.dll
+
+  release-web:
+    name: Release (JS)
+    runs-on: ubuntu-latest
+    environment: Release
+    needs: prerelease
+    permissions:
+      pages: write
+      id-token: write
+      contents: write
+    if: ${{ needs.prerelease.outputs.web_changesets != '[]' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18.x
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bump versions
+        uses: actions/github-script@v6
+        env:
+          CHANGESETS: ${{ needs.prerelease.outputs.web_changesets }}
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const cp = require("child_process");
+            for (const changeset of JSON.parse(process.env.CHANGESETS)) {
+              const projectPath = path.join("projects", changeset.game, changeset.project);
+              const changelogPath = path.join(projectPath, "CHANGELOG.md");
+              const packageJson = JSON.parse(
+                fs.readFileSync(path.join(projectPath, "package.json"), "utf8")
+              );
+              const result = cp.spawnSync(
+                "npm",
+                [
+                  "-w",
+                  packageJson.name,
+                  "version",
+                  "--no-git-tag-version",
+                  changeset.version_bump_type.toLowerCase(),
+                ],
+                { stdio: "inherit" }
+              );
+              if (result.status) throw new Error("Command failed");
+              const packageJson2 = JSON.parse(
+                fs.readFileSync(path.join(projectPath, "package.json"), "utf8")
+              );
+              const oldChangelog = fs.readFileSync(changelogPath, "utf8");
+              fs.writeFileSync(
+                changelogPath,
+                `## ${packageJson2.version}\n\n${changeset.changelog_description}\n\n${oldChangelog}`
+              );
+              fs.unlinkSync(path.join("changesets", changeset.filename));
+            }
+
+      - name: Build
+        run: npm -ws run build
+
+      - name: Publish to npm
+        uses: actions/github-script@v6
+        env:
+          CHANGESETS: ${{ needs.prerelease.outputs.web_changesets }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const cp = require("child_process");
+            for (const changeset of JSON.parse(process.env.CHANGESETS)) {
+              const projectPath = path.join("projects", changeset.game, changeset.project);
+              const packageJson = JSON.parse(
+                fs.readFileSync(path.join(projectPath, "package.json"), "utf8")
+              );
+              if (packageJson.private) continue;
+              const result = cp.spawnSync(
+                "npm",
+                ["-w", packageJson.name, "publish", "--access=public"],
+                { stdio: "inherit" }
+              );
+              if (result.status) throw new Error("Command failed");
+            }
+
+      - name: Commit version bumps
+        run: |
+          Remove-Item "./changesets/${{ matrix.changeset.filename }}"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global core.autocrlf input
+          git add -A
+          git commit -m "Release" --no-verify
+          for ($i = 0; $i -lt 3; $i++) {
+            git fetch
+            try {
+              git rebase --autostash --no-verify
+            } catch {
+              git rebase --abort
+              Write-Output "Failed to rebase with main, probably due to git conflict. Manual fix required..."
+              exit 1
+            }
+            git push --no-verify
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+          }
+          Write-Output "Failed to push version bump after 3 retries. Manual fix required..."
+          exit 1
+
+      - name: Check if should deploy pages
+        id: deploy_pages
+        uses: actions/github-script@v6
+        env:
+          CHANGESETS: ${{ needs.prerelease.outputs.web_changesets }}
+        with:
+          script: |
+            var projects = new Set(JSON.parse(process.env.CHANGESETS).map(changeset => changeset.project));
+            console.log(projects);
+            return ["vr-input-viewer"].some(name => projects.has(name));
+
+      - name: Bundle pages
+        if: ${{ steps.deploy_pages.outputs.result == 'true' }}
+        run: ./pages/build.sh
+
+      - name: Upload vr.jf.id.au
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+        with:
+          server: ftpupload.net
+          protocol: ftps
+          username: if0_34708249
+          password: ${{ secrets.IF_FTP_PASSWORD }}
+          local-dir: ./pages/dist/vr.jf.id.au/
+          server-dir: ./vr.jf.id.au/htdocs/
+
+      - name: Upload pages artifact
+        if: ${{ steps.deploy_pages.outputs.result == 'true' }}
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: ./pages/dist/github-pages
+
+      - name: Deploy pages
+        if: ${{ steps.deploy_pages.outputs.result == 'true' }}
+        uses: actions/deploy-pages@v2

@@ -1,0 +1,33 @@
+{
+  "name": "@jakzo/slz-speedrun-tools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Speedrun utilities for Stress Level Zero games.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jakzo/SlzMods.git"
+  },
+  "author": "jakzo",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jakzo/SlzMods/issues"
+  },
+  "homepage": "https://github.com/jakzo/SlzMods#readme",
+  "workspaces": [
+    "./projects/*/*"
+  ],
+  "scripts": {
+    "test": "prettier --check \"**/*.{js,jsx,ts,tsx,json,md}\"",
+    "quest:logs": "adb logcat -v time MelonLoader:D CRASH:D Mono:W mono:D mono-rt:D Zygote:D A64_HOOK:V DEBUG:D Binder:D AndroidRuntime:D *:S",
+    "build": "node ./scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@tsconfig/node18-strictest-esm": "^1.0.1",
+    "prettier": "^2.8.1",
+    "tsx": "^3.12.7",
+    "typescript": "^5.1.6",
+    "undici": "^5.14.0",
+    "vite": "^4.0.0"
+  }
+}
